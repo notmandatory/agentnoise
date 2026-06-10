@@ -32,6 +32,8 @@ use agentnoise::wn::{MessageEvent, WnClient};
 use agentnoise::workspace;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
+#[cfg(feature = "db-keystore")]
+use db_keystore::{DbKeyStore, DbKeyStoreConfig};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
@@ -625,6 +627,82 @@ fn main() -> Result<()> {
         })
         .transpose()?;
     let config_path = Config::path_or_default(cli.config, instance.as_deref());
+
+    #[cfg(feature = "db-keystore")]
+    {
+        let path = dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("keystore")
+            .join("agentnoise.sqlite");
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| anyhow::anyhow!("failed to create keystore dir: {e}"))?;
+        }
+        let db_keystore_config = DbKeyStoreConfig {
+            path,
+            ..Default::default()
+        };
+        let db_keystore = DbKeyStore::new(db_keystore_config)
+            .map_err(|e| anyhow::anyhow!("failed to open keystore: {e}"))?;
+
+        keyring_core::set_default_store(db_keystore);
+    }
+
+    #[cfg(all(not(feature = "db-keystore"), target_os = "macos"))]
+    {
+        use apple_native_keyring_store::keychain::Store;
+        match Store::new() {
+            Ok(store) => keyring_core::set_default_store(store),
+            Err(e) => bail!("failed to initialize macOS keychain: {e}"),
+        }
+    }
+
+    #[cfg(all(not(feature = "db-keystore"), target_os = "windows"))]
+    {
+        use windows_native_keyring_store::store::Store;
+        match Store::new() {
+            Ok(store) => keyring_core::set_default_store(store),
+            Err(e) => bail!("failed to initialize Windows credential store: {e}"),
+        }
+    }
+
+    #[cfg(all(not(feature = "db-keystore"), target_os = "linux"))]
+    {
+        // Try to use Secret Service first (most common on modern Linux)
+        use zbus_secret_service_keyring_store::store::Store as ZbusStore;
+        use dbus_secret_service_keyring_store::store::Store as DbusStore;
+        use linux_keyutils_keyring_store::store::Store as KeyutilsStore;
+
+        // Try zbus first, fall back to dbus, then keyutils
+        if let Ok(store) = ZbusStore::new() {
+            keyring_core::set_default_store(store);
+        } else if let Ok(store) = DbusStore::new() {
+            keyring_core::set_default_store(store);
+        } else {
+            match KeyutilsStore::new() {
+                Ok(store) => keyring_core::set_default_store(store),
+                Err(e) => bail!("failed to initialize any Linux keyring store: {e}"),
+            }
+        }
+    }
+
+    #[cfg(all(not(feature = "db-keystore"), any(target_os = "freebsd", target_os = "openbsd")))]
+    {
+        // Use Secret Service for BSD systems
+        use zbus_secret_service_keyring_store::store::Store as ZbusStore;
+        use dbus_secret_service_keyring_store::store::Store as DbusStore;
+
+        // Try zbus first, fall back to dbus
+        if let Ok(store) = ZbusStore::new() {
+            keyring_core::set_default_store(store);
+        } else {
+            match DbusStore::new() {
+                Ok(store) => keyring_core::set_default_store(store),
+                Err(e) => bail!("failed to initialize BSD secret service: {e}"),
+            }
+        }
+    }
 
     match cli.command {
         Command::Init(args) => {

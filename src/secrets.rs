@@ -1,7 +1,7 @@
 use std::io::{self, BufRead, IsTerminal, Write};
 
 use anyhow::{Context, Result, bail};
-use keyring::{Entry, Error as KeyringError};
+use keyring_core::{Entry, Error as KeyringError};
 use zeroize::Zeroize;
 
 pub const DEFAULT_SERVICE: &str = "agentnoise";
